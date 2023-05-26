@@ -1,6 +1,8 @@
 name: GriefPrevention
 main: me.ryanhamshire.GriefPrevention.GriefPrevention
 softdepend: [Vault, Multiverse-Core, My_Worlds, MystCraft, Transporter, WorldGuard, WorldEdit, RoyalCommands, MultiWorld, Denizen]
+depend:
+  - BetterTeams
 dev-url: https://dev.bukkit.org/projects/grief-prevention
 version: '${git.commit.id.describe}'
 api-version: '1.17'
@@ -47,6 +49,16 @@ commands:
       description: Switches the shovel tool to subdivision mode, used to subdivide your claims.
       usage: /SubdivideClaims
       aliases: [sc, subdivideclaim]
+      permission: griefprevention.claims
+    teamclaim:
+      description: Switches the shovel tool to team mode, used to create team claims.
+      usage: /TeamClaim
+      aliases: [ tc, teamclaim ]
+      permission: griefprevention.claims
+    teamclaimblocks:
+      description: Enabled team claimblock transferring.
+      usage: /teamclaimblocks <deposit | withdraw | accept | decline> <amount | player>
+      aliases: [ tcb ]
       permission: griefprevention.claims
     restrictsubclaim:
       description: Restricts a subclaim, so that it inherits no permissions from the parent claim
@@ -169,6 +181,11 @@ commands:
       description: Lists information about a player's claim blocks and claims.
       usage: /ClaimsList or /ClaimsList <player>
       aliases: [claimlist, listclaims]
+      permission: griefprevention.claims
+    teamclaimslist:
+      description: Lists information about a team's claim blocks and claims.
+      usage: /TeamClaimsList or /TeamClaimsList <team>
+      aliases: [tcl]
       permission: griefprevention.claims
     claimexplosions:
       description: Toggles whether explosives may be used in a specific land claim.

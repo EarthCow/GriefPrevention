@@ -18,6 +18,9 @@
 
 package me.ryanhamshire.GriefPrevention;
 
+import com.booksaw.betterTeams.PlayerRank;
+import com.booksaw.betterTeams.Team;
+import com.booksaw.betterTeams.TeamPlayer;
 import com.griefprevention.visualization.BoundaryVisualization;
 import com.griefprevention.visualization.VisualizationType;
 import me.ryanhamshire.GriefPrevention.DataStore.NoTransferException;
@@ -25,6 +28,7 @@ import me.ryanhamshire.GriefPrevention.events.PreventBlockBreakEvent;
 import me.ryanhamshire.GriefPrevention.events.SaveTrappedPlayerEvent;
 import me.ryanhamshire.GriefPrevention.events.TrustChangedEvent;
 import me.ryanhamshire.GriefPrevention.metrics.MetricsHandler;
+import net.milkbowl.vault.chat.Chat;
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.BanList;
 import org.bukkit.BanList.Type;
@@ -69,6 +73,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -97,6 +104,10 @@ public class GriefPrevention extends JavaPlugin
 
     // Player event handler
     PlayerEventHandler playerEventHandler;
+
+    //team event handler
+    TeamEventHandler teamEventHandler;
+
     //configuration variables, loaded/saved from a config.yml
 
     //claim mode for each world
@@ -117,6 +128,7 @@ public class GriefPrevention extends JavaPlugin
     public boolean config_claims_enderPearlsRequireAccessTrust;        //whether teleporting into a claim with a pearl requires access trust
     public boolean config_claims_raidTriggersRequireBuildTrust;      //whether raids are triggered by a player that doesn't have build permission in that claim
     public int config_claims_maxClaimsPerPlayer;                    //maximum number of claims per player
+    public int config_claims_maxClaimsPerTeam;                      //maximum number of claims per team
     public boolean config_claims_respectWorldGuard;                 //whether claim creations requires WG build permission in creation area
     public boolean config_claims_villagerTradingRequiresTrust;      //whether trading with a claimed villager requires permission
 
@@ -366,6 +378,10 @@ public class GriefPrevention extends JavaPlugin
         playerEventHandler = new PlayerEventHandler(this.dataStore, this);
         pluginManager.registerEvents(playerEventHandler, this);
 
+        //player events
+        teamEventHandler = new TeamEventHandler();
+        pluginManager.registerEvents(teamEventHandler, this);
+
         //block events
         BlockEventHandler blockEventHandler = new BlockEventHandler(this.dataStore);
         pluginManager.registerEvents(blockEventHandler, this);
@@ -581,6 +597,7 @@ public class GriefPrevention extends JavaPlugin
         this.config_claims_allowTrappedInAdminClaims = config.getBoolean("GriefPrevention.Claims.AllowTrappedInAdminClaims", false);
 
         this.config_claims_maxClaimsPerPlayer = config.getInt("GriefPrevention.Claims.MaximumNumberOfClaimsPerPlayer", 0);
+        this.config_claims_maxClaimsPerTeam = config.getInt("GriefPrevention.Claims.MaximumNumberOfClaimsPerTeam", 0);
         this.config_claims_respectWorldGuard = config.getBoolean("GriefPrevention.Claims.CreationRequiresWorldGuardBuildPermission", true);
         this.config_claims_villagerTradingRequiresTrust = config.getBoolean("GriefPrevention.Claims.VillagerTradingRequiresPermission", true);
         String accessTrustSlashCommands = config.getString("GriefPrevention.Claims.CommandsRequiringAccessTrust", "/sethome");
@@ -827,6 +844,7 @@ public class GriefPrevention extends JavaPlugin
         outConfig.set("GriefPrevention.Claims.Expiration.AutomaticNatureRestoration.SurvivalWorlds", this.config_claims_survivalAutoNatureRestoration);
         outConfig.set("GriefPrevention.Claims.AllowTrappedInAdminClaims", this.config_claims_allowTrappedInAdminClaims);
         outConfig.set("GriefPrevention.Claims.MaximumNumberOfClaimsPerPlayer", this.config_claims_maxClaimsPerPlayer);
+        outConfig.set("GriefPrevention.Claims.MaximumNumberOfClaimsPerTeam", this.config_claims_maxClaimsPerTeam);
         outConfig.set("GriefPrevention.Claims.CreationRequiresWorldGuardBuildPermission", this.config_claims_respectWorldGuard);
         outConfig.set("GriefPrevention.Claims.VillagerTradingRequiresPermission", this.config_claims_villagerTradingRequiresTrust);
         outConfig.set("GriefPrevention.Claims.CommandsRequiringAccessTrust", accessTrustSlashCommands);
@@ -1984,6 +2002,181 @@ public class GriefPrevention extends JavaPlugin
             return true;
         }
 
+        //teamclaim
+        else if (cmd.getName().equalsIgnoreCase("teamclaim") && player != null)
+        {
+            PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
+            Team team = Team.getTeam(player);
+            if (team == null) {
+                GriefPrevention.sendMessage(player, TextMode.Err, Messages.NoTeam);
+                return true;
+            }
+            if (!team.getMembers().getConvertedList().contains(player.getUniqueId() + ",OWNER")) {
+                GriefPrevention.sendMessage(player, TextMode.Err, Messages.NotTeamOwner);
+                return true;
+            }
+            playerData.shovelMode = ShovelMode.Team;
+            GriefPrevention.sendMessage(player, TextMode.Instr, Messages.TeamMode);
+            GriefPrevention.sendMessage(player, TextMode.Instr, Messages.TeamVideo, DataStore.SUBDIVISION_VIDEO_URL);
+
+            return true;
+        }
+
+        //teamclaimblocks
+        else if (cmd.getName().equalsIgnoreCase("teamclaimblocks") && player != null) {
+            if (args.length != 2) return false;
+            Team team = Team.getTeam(player);
+            if (team == null) {
+                player.sendMessage(ChatColor.RED + "You must be on a team to do that!");
+                return true;
+            }
+            TeamData teamData = this.dataStore.getTeamData(team.getID());
+            int remainingClaimBlocks = teamData.getRemainingClaimBlocks();
+            PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
+            boolean isOwner = team.getMembers().getConvertedList().contains(player.getUniqueId() + ",OWNER");
+            if (args[0].equals("withdraw")) {
+                if (remainingClaimBlocks == 0) {
+                    player.sendMessage(team.getColor() + team.getName() + ChatColor.GRAY + " has " + ChatColor.RED + "zero" + ChatColor.GRAY + " claimblocks");
+                    return true;
+                }
+                if (teamData.getWithdrawRequests().get(player.getUniqueId()) != null) {
+                    player.sendMessage(ChatColor.RED + "You already have an active request!");
+                    return true;
+                }
+
+                if (args[1].equals("all") || remainingClaimBlocks < Integer.parseInt(args[1])) {
+                    if (isOwner) {
+                        teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() - remainingClaimBlocks);
+                        playerData.accrueBlocks(remainingClaimBlocks);
+                        this.dataStore.savePlayerData(player.getUniqueId(), playerData);
+                        this.dataStore.saveTeamData(team.getID(), teamData);
+                        player.sendMessage(ChatColor.GREEN + "You withdrew " + remainingClaimBlocks + " from your team and now have " + playerData.getRemainingClaimBlocks());
+                    } else {
+                        if (team.getRank(PlayerRank.OWNER).stream().filter(teamPlayer -> teamPlayer.getPlayer().getPlayer() != null).findFirst().orElse(null) != null)
+                        {
+                            player.sendMessage(ChatColor.GRAY + "Your request was sent");
+                            Player requester = player;
+                            team.getRank(PlayerRank.OWNER).forEach(teamPlayer -> {
+                                if (teamPlayer.getPlayer().isOnline())
+                                {
+                                    if (teamPlayer.getPlayer().getPlayer() != null)
+                                    {
+                                        teamPlayer.getPlayer().getPlayer().sendMessage(ChatColor.DARK_PURPLE + requester.getName() + ChatColor.GRAY + " is requesting to withdraw " + ChatColor.AQUA + args[1] + " (all)" + ChatColor.GRAY + " claim blocks from the team which currently has " + ChatColor.DARK_AQUA + remainingClaimBlocks);
+                                        teamPlayer.getPlayer().getPlayer().sendMessage(ChatColor.GRAY + "You can run " + ChatColor.AQUA + "/tcb decline " + ChatColor.DARK_PURPLE + requester.getName() + ChatColor.GRAY + " or " + ChatColor.AQUA + "/tcb accept " + ChatColor.DARK_PURPLE + requester.getName());
+                                    }
+                                }
+                            });
+                            teamData.getWithdrawRequests().put(player.getUniqueId(), args[1]);
+
+                            ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
+                            teamData.getWithdrawRequestTimeouts().put(player.getUniqueId(), executorService.schedule(() -> {
+                                // Code to execute after two minutes
+                                if (teamData.getWithdrawRequests().get(requester.getUniqueId()) != null)
+                                {
+                                    teamData.getWithdrawRequestTimeouts().remove(requester.getUniqueId());
+                                    teamData.getWithdrawRequests().remove(requester.getUniqueId());
+                                    requester.sendMessage(ChatColor.AQUA + "Your claimblock request has expired");
+                                }
+
+                            }, 2, TimeUnit.MINUTES));
+
+                            executorService.shutdown();
+                        }
+                    }
+                } else {
+                    if (isOwner) {
+                        teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() - Integer.parseInt(args[1]));
+                        playerData.accrueBlocks(Integer.parseInt(args[1]));
+                        player.sendMessage(ChatColor.GREEN + "You withdrew " + args[1] + " from your team and now have " + playerData.getRemainingClaimBlocks());
+                        this.dataStore.savePlayerData(player.getUniqueId(), playerData);
+                        this.dataStore.saveTeamData(team.getID(), teamData);
+                    } else {
+                        if (team.getRank(PlayerRank.OWNER).stream().filter(teamPlayer -> teamPlayer.getPlayer().getPlayer() != null).findFirst().orElse(null) != null) {
+                            player.sendMessage(ChatColor.GRAY + "Your request was sent");
+                            Player requester = player;
+                            team.getRank(PlayerRank.OWNER).forEach(teamPlayer -> {
+                                if (teamPlayer.getPlayer().isOnline()) {
+                                    if (teamPlayer.getPlayer().getPlayer() != null) {
+                                        teamPlayer.getPlayer().getPlayer().sendMessage(ChatColor.DARK_PURPLE + requester.getName() + ChatColor.GRAY + " is requesting to withdraw " + ChatColor.AQUA + args[1] + ChatColor.GRAY + " claim blocks from the team which currently has " + ChatColor.DARK_AQUA + remainingClaimBlocks);
+                                        teamPlayer.getPlayer().getPlayer().sendMessage(ChatColor.GRAY + "You can run " + ChatColor.AQUA + "/tcb decline " + ChatColor.DARK_PURPLE + requester.getName() + ChatColor.GRAY + " or " + ChatColor.AQUA + "/tcb accept " + ChatColor.DARK_PURPLE + requester.getName());
+                                    }
+                                }
+                            });
+                            teamData.getWithdrawRequests().put(player.getUniqueId(), args[1]);
+
+                            ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
+                            teamData.getWithdrawRequestTimeouts().put(player.getUniqueId(), executorService.schedule(() -> {
+                                // Code to execute after two minutes
+                                if (teamData.getWithdrawRequests().get(requester.getUniqueId()) != null) {
+                                    teamData.getWithdrawRequestTimeouts().remove(requester.getUniqueId());
+                                    teamData.getWithdrawRequests().remove(requester.getUniqueId());
+                                    requester.sendMessage(ChatColor.AQUA + "Your claimblock request has expired");
+                                }
+
+                            }, 2, TimeUnit.MINUTES));
+
+                            executorService.shutdown();
+                        } else {
+                            player.sendMessage(ChatColor.AQUA + "Your request could not be sent because there are no team owners online");
+                        }
+                    }
+                }
+            } else if (args[0].equals("deposit")) {
+                int depositAmount;
+                if (args[1].equals("all")) {
+                    depositAmount = playerData.getRemainingClaimBlocks();
+                } else {
+                    depositAmount = Integer.parseInt(args[1]);
+                }
+                if (playerData.getRemainingClaimBlocks() < depositAmount) {
+                    player.sendMessage(ChatColor.RED + "You do not have enough claimblocks for that!");
+                    return true;
+                }
+                playerData.setAccruedClaimBlocks(playerData.getAccruedClaimBlocks() - depositAmount);
+                teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() + depositAmount);
+                this.dataStore.savePlayerData(player.getUniqueId(), playerData);
+                this.dataStore.saveTeamData(team.getID(), teamData);
+                player.sendMessage(ChatColor.GREEN + "You deposited " + depositAmount + " to your team which now has " + teamData.getRemainingClaimBlocks());
+            } else if (args[0].equals("decline") || args[0].equals("accept")) {
+                if (!isOwner) {
+                    player.sendMessage(ChatColor.RED + "Only team owners can do that!");
+                    return true;
+                }
+                Player requester = Bukkit.getPlayer(args[1]);
+                if (requester == null) {
+                    player.sendMessage(ChatColor.RED + "That player could not be found!");
+                    return true;
+                }
+                String amount = teamData.getWithdrawRequests().get(requester.getUniqueId());
+                if (amount == null) {
+                    player.sendMessage(ChatColor.RED + "That player does not have an active request!");
+                    return true;
+                }
+                teamData.getWithdrawRequestTimeouts().get(requester.getUniqueId()).cancel(true);
+                teamData.getWithdrawRequestTimeouts().remove(requester.getUniqueId());
+                teamData.getWithdrawRequests().remove(requester.getUniqueId());
+                if (args[0].equals("decline")) {
+                    requester.sendMessage(ChatColor.DARK_PURPLE + player.getName() + ChatColor.GRAY + " has respectfully " + ChatColor.RED + "declined" + ChatColor.GRAY + " your request for claimblocks");
+                } else {
+                    PlayerData requesterPlayerData = this.dataStore.getPlayerData(requester.getUniqueId());
+                    if (amount.equals("all") || (remainingClaimBlocks < Integer.parseInt(amount))) {
+                        teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() - remainingClaimBlocks);
+                        requesterPlayerData.accrueBlocks(remainingClaimBlocks);
+                        requester.sendMessage(ChatColor.DARK_PURPLE + player.getName() + ChatColor.GRAY + " has " + ChatColor.GREEN + "accepted" + ChatColor.GRAY + " your request for " + ChatColor.AQUA + remainingClaimBlocks + ChatColor.RED + " (all)" + ChatColor.GRAY + " claimblocks and you now have " + ChatColor.DARK_AQUA + requesterPlayerData.getRemainingClaimBlocks() + ChatColor.GRAY + " claimblocks");
+                        player.sendMessage(ChatColor.GRAY + "All of the team's claimblocks were " + ChatColor.GREEN + "successfully" + ChatColor.GRAY + " sent to " + ChatColor.DARK_PURPLE + requester.getName());
+                    } else {
+                        teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() - Integer.parseInt(amount));
+                        requesterPlayerData.accrueBlocks(Integer.parseInt(amount));
+                        requester.sendMessage(ChatColor.DARK_PURPLE + player.getName() + ChatColor.GRAY + " has " + ChatColor.GREEN + "accepted" + ChatColor.GRAY + " your request for " + ChatColor.AQUA + amount + ChatColor.GRAY + " claimblocks and you now have " + ChatColor.DARK_AQUA + requesterPlayerData.getRemainingClaimBlocks() + ChatColor.GRAY + " claimblocks");
+                        player.sendMessage(ChatColor.AQUA + amount + ChatColor.GRAY + " of the team's claimblocks were " + ChatColor.GREEN + "successfully" + ChatColor.GRAY + " sent to " + ChatColor.DARK_PURPLE + requester.getName());
+                    }
+                    this.dataStore.savePlayerData(player.getUniqueId(), playerData);
+                    this.dataStore.saveTeamData(team.getID(), teamData);
+                }
+            } else return false;
+            return true;
+        }
+
         //deleteclaim
         else if (cmd.getName().equalsIgnoreCase("deleteclaim") && player != null)
         {
@@ -2167,6 +2360,73 @@ public class GriefPrevention extends JavaPlugin
                 task.run();
                 return true;
             }
+        }
+
+        //teamclaimslist or teamclaimslist <team>
+        else if (cmd.getName().equalsIgnoreCase("teamclaimslist"))
+        {
+            //at most one parameter
+            if (args.length > 1) return false;
+
+            //team whose claims will be listed
+            Team team;
+
+            //if another team isn't specified, assume current player
+            if (args.length < 1)
+            {
+                if (player != null) {
+                    team = Team.getTeam(player);
+                    if (team == null) {
+                        GriefPrevention.sendMessage(player, TextMode.Err, Messages.NoTeam);
+                        return true;
+                    }
+                }
+                else
+                    return false;
+            }
+
+            //otherwise if no permission to delve into another player's claims data
+            else if (player != null && !player.hasPermission("griefprevention.teamclaimslistother"))
+            {
+                GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimsListNoPermission);
+                return true;
+            }
+
+            //otherwise try to find the specified team
+            else
+            {
+                team = Team.getTeam(args[0]);
+                if (team == null)
+                {
+                    GriefPrevention.sendMessage(player, TextMode.Err, Messages.PlayerNotFound2);
+                    return true;
+                }
+            }
+
+            //load the target player's data
+            TeamData teamData = this.dataStore.getTeamData(team.getID());
+            Vector<Claim> claims = teamData.getClaims();
+            GriefPrevention.sendMessage(player, TextMode.Instr, Messages.StartBlockMath,
+                    String.valueOf(teamData.getBaseClaimBlocks()),
+                    String.valueOf(0),
+                    String.valueOf(teamData.getBaseClaimBlocks()));
+            if (claims.size() > 0)
+            {
+                GriefPrevention.sendMessage(player, TextMode.Instr, Messages.ClaimsListHeader);
+                for (int i = 0; i < teamData.getClaims().size(); i++)
+                {
+                    Claim claim = teamData.getClaims().get(i);
+                    GriefPrevention.sendMessage(player, TextMode.Instr, getfriendlyLocationString(claim.getLesserBoundaryCorner()) + this.dataStore.getMessage(Messages.ContinueBlockMath, String.valueOf(claim.getArea())));
+                }
+
+                GriefPrevention.sendMessage(player, TextMode.Instr, Messages.EndBlockMath, String.valueOf(teamData.getRemainingClaimBlocks()));
+            }
+
+            //drop the data we just loaded, if the player isn't online
+//            if (!team.isOnline())
+//                this.dataStore.clearCachedPlayerData(otherPlayer.getUniqueId());
+
+            return true;
         }
 
         //claimslist or claimslist <player>
@@ -2894,6 +3154,7 @@ public class GriefPrevention extends JavaPlugin
     private boolean abandonClaimHandler(Player player, boolean deleteTopLevelClaim)
     {
         PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
+        TeamData teamData = null;
 
         //which claim is being abandoned?
         Claim claim = this.dataStore.getClaimAt(player.getLocation(), true /*ignore height*/, null);
@@ -2902,8 +3163,11 @@ public class GriefPrevention extends JavaPlugin
             GriefPrevention.sendMessage(player, TextMode.Instr, Messages.AbandonClaimMissing);
         }
 
+        else if (claim.isTeamClaim() && !Team.getTeam(claim.getOwnerID()).getMembers().getConvertedList().contains(player.getUniqueId() + ",OWNER")) {
+            GriefPrevention.sendMessage(player, TextMode.Err, Messages.NotTeamOwner);
+        }
         //verify ownership
-        else if (claim.checkPermission(player, ClaimPermission.Edit, null) != null)
+        else if (!claim.isTeamClaim() && claim.checkPermission(player, ClaimPermission.Edit, null) != null)
         {
             GriefPrevention.sendMessage(player, TextMode.Err, Messages.NotYourClaim);
         }
@@ -2931,12 +3195,24 @@ public class GriefPrevention extends JavaPlugin
             //adjust claim blocks when abandoning a top level claim
             if (this.config_claims_abandonReturnRatio != 1.0D && claim.parent == null && claim.ownerID.equals(playerData.playerID))
             {
-                playerData.setAccruedClaimBlocks(playerData.getAccruedClaimBlocks() - (int) Math.ceil((claim.getArea() * (1 - this.config_claims_abandonReturnRatio))));
+                if (claim.isTeamClaim())
+                {
+                    teamData = this.dataStore.getTeamData(claim.getOwnerID());
+                    teamData.setBaseClaimBlocks(teamData.getBaseClaimBlocks() - (int) Math.ceil((claim.getArea() * (1 - this.config_claims_abandonReturnRatio))));
+                } else
+                    playerData.setAccruedClaimBlocks(playerData.getAccruedClaimBlocks() - (int) Math.ceil((claim.getArea() * (1 - this.config_claims_abandonReturnRatio))));
             }
 
-            //tell the player how many claim blocks he has left
-            int remainingBlocks = playerData.getRemainingClaimBlocks();
-            GriefPrevention.sendMessage(player, TextMode.Success, Messages.AbandonSuccess, String.valueOf(remainingBlocks));
+            if (claim.isTeamClaim()) {
+                //tell the player how many claim blocks the team has left
+                teamData = this.dataStore.getTeamData(claim.getOwnerID());
+                int remainingBlocks = teamData.getRemainingClaimBlocks();
+                GriefPrevention.sendMessage(player, TextMode.Success, Messages.TeamAbandonSuccess, String.valueOf(remainingBlocks));
+            } else {
+                //tell the player how many claim blocks he has left
+                int remainingBlocks = playerData.getRemainingClaimBlocks();
+                GriefPrevention.sendMessage(player, TextMode.Success, Messages.AbandonSuccess, String.valueOf(remainingBlocks));
+            }
 
             //revert any current visualization
             playerData.setVisibleBoundaries(null);
@@ -3255,6 +3531,11 @@ public class GriefPrevention extends JavaPlugin
             UUID playerID = player.getUniqueId();
             PlayerData playerData = this.dataStore.getPlayerData(playerID);
             this.dataStore.savePlayerDataSync(playerID, playerData);
+            Team team = Team.getTeam(player);
+            if (team != null) {
+                TeamData teamData = this.dataStore.getTeamData(team.getID());
+                this.dataStore.saveTeamDataSync(team.getID(), teamData);
+            }
         }
 
         this.dataStore.close();

@@ -18,6 +18,7 @@
 
 package me.ryanhamshire.GriefPrevention;
 
+import com.booksaw.betterTeams.Team;
 import com.google.common.io.Files;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -70,12 +71,14 @@ public class FlatFileDataStore extends DataStore
         //ensure data folders exist
         boolean newDataStore = false;
         File playerDataFolder = new File(playerDataFolderPath);
+        File teamDataFolder = new File(teamDataFolderPath);
         File claimDataFolder = new File(claimDataFolderPath);
-        if (!playerDataFolder.exists() || !claimDataFolder.exists())
+        if (!playerDataFolder.exists() || !claimDataFolder.exists() || !teamDataFolder.exists())
         {
             newDataStore = true;
             playerDataFolder.mkdirs();
             claimDataFolder.mkdirs();
+            teamDataFolder.mkdirs();
         }
 
         //if there's no data yet, then anything written will use the schema implemented by this code
@@ -519,10 +522,12 @@ public class FlatFileDataStore extends DataStore
 
         boolean inheritNothing = yaml.getBoolean("inheritNothing");
 
+        boolean isTeamClaim = yaml.getBoolean("isTeamClaim");
+
         out_parentID.add(yaml.getLong("Parent Claim ID", -1L));
 
         //instantiate
-        claim = new Claim(lesserBoundaryCorner, greaterBoundaryCorner, ownerID, builders, containers, accessors, managers, inheritNothing, claimID);
+        claim = new Claim(lesserBoundaryCorner, greaterBoundaryCorner, ownerID, builders, containers, accessors, managers, inheritNothing, claimID, isTeamClaim);
         claim.modifiedDate = new Date(lastModifiedDate);
         claim.id = claimID;
 
@@ -562,6 +567,8 @@ public class FlatFileDataStore extends DataStore
         yaml.set("Parent Claim ID", parentID);
 
         yaml.set("inheritNothing", claim.getSubclaimRestrictions());
+
+        yaml.set("isTeamClaim", claim.isTeamClaim());
 
         return yaml.saveToString();
     }
@@ -726,6 +733,146 @@ public class FlatFileDataStore extends DataStore
         catch (Exception e)
         {
             GriefPrevention.AddLogEntry("GriefPrevention: Unexpected exception saving data for player \"" + playerID.toString() + "\": " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    synchronized TeamData getTeamDataFromStorage(UUID teamID)
+    {
+        File teamFile = new File(teamDataFolderPath + File.separator + teamID.toString());
+
+        TeamData teamData = new TeamData();
+        teamData.teamID = teamID;
+
+        //if it exists as a file, read the file
+        if (teamFile.exists())
+        {
+            boolean needRetry = false;
+            int retriesRemaining = 5;
+            Exception latestException = null;
+            do
+            {
+                try
+                {
+                    needRetry = false;
+
+                    //read the file content and immediately close it
+                    List<String> lines = Files.readLines(teamFile, Charset.forName("UTF-8"));
+                    Iterator<String> iterator = lines.iterator();
+
+                    //first line is base claim blocks
+                    String baseBlocksString = iterator.next();
+
+                    //convert that to a number and store it
+                    teamData.setBaseClaimBlocks(Integer.parseInt(baseBlocksString));
+                }
+
+                //if there's any problem with the file's content, retry up to 5 times with 5 milliseconds between
+                catch (Exception e)
+                {
+                    latestException = e;
+                    needRetry = true;
+                    retriesRemaining--;
+                }
+
+                try
+                {
+                    if (needRetry) Thread.sleep(5);
+                }
+                catch (InterruptedException exception) {}
+
+            } while (needRetry && retriesRemaining >= 0);
+
+            //if last attempt failed, log information about the problem
+            if (needRetry)
+            {
+                StringWriter errors = new StringWriter();
+                latestException.printStackTrace(new PrintWriter(errors));
+                GriefPrevention.AddLogEntry("Failed to load TeamData for " + teamID + ". This usually occurs when your server runs out of storage space, causing any file saves to corrupt. Fix or delete the file in GriefPrevetionData/PlayerData/" + teamID, CustomLogEntryTypes.Debug, false);
+                GriefPrevention.AddLogEntry(teamID + " " + errors.toString(), CustomLogEntryTypes.Exception);
+            }
+        }
+
+        return teamData;
+    }
+
+    @Override
+    synchronized boolean removeTeamDataFromStorage(UUID teamID)
+    {
+        File teamFile = new File(teamDataFolderPath + File.separator + teamID.toString());
+
+        TeamData teamData = new TeamData();
+        teamData.teamID = teamID;
+
+        //if it exists as a file, read the file
+        if (teamFile.exists())
+        {
+            boolean needRetry = false;
+            int retriesRemaining = 5;
+            boolean result = false;
+            Exception latestException = null;
+            do
+            {
+                try
+                {
+                    needRetry = false;
+
+                    result = teamFile.delete();
+                }
+
+                //if there's any problem with the file's content, retry up to 5 times with 5 milliseconds between
+                catch (Exception e)
+                {
+                    latestException = e;
+                    needRetry = true;
+                    retriesRemaining--;
+                }
+
+                try
+                {
+                    if (needRetry) Thread.sleep(5);
+                }
+                catch (InterruptedException exception) {}
+
+            } while (needRetry && retriesRemaining >= 0);
+
+            //if last attempt failed, log information about the problem
+            if (needRetry)
+            {
+                StringWriter errors = new StringWriter();
+                latestException.printStackTrace(new PrintWriter(errors));
+                GriefPrevention.AddLogEntry("Failed to delete TeamData for " + teamID + ". This usually occurs when your server runs out of storage space, causing any file saves to corrupt. Fix or delete the file in GriefPrevetionData/PlayerData/" + teamID, CustomLogEntryTypes.Debug, false);
+                GriefPrevention.AddLogEntry(teamID + " " + errors.toString(), CustomLogEntryTypes.Exception);
+            }
+            return result;
+        } else {
+            return false;
+        }
+    }
+
+    //saves changes to player data.  MUST be called after you're done making changes, otherwise a reload will lose them
+    @Override
+    public void overrideSaveTeamData(UUID teamID, TeamData teamData)
+    {
+        //never save data for the "administrative" account.  null for claim owner ID indicates administrative account
+        if (teamID == null) return;
+
+        StringBuilder fileContent = new StringBuilder();
+        try
+        {
+            fileContent.append(String.valueOf(teamData.getBaseClaimBlocks()));
+            fileContent.append("\n");
+
+            //write data to file
+            File playerDataFile = new File(teamDataFolderPath + File.separator + teamID.toString());
+            Files.write(fileContent.toString().getBytes("UTF-8"), playerDataFile);
+        }
+
+        //if any problem, log it
+        catch (Exception e)
+        {
+            GriefPrevention.AddLogEntry("GriefPrevention: Unexpected exception saving data for team \"" + teamID.toString() + "\": " + e.getMessage());
             e.printStackTrace();
         }
     }

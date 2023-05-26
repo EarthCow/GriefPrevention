@@ -192,6 +192,13 @@
             <version>5.7.0</version>
             <scope>test</scope>
         </dependency>
+        <!-- BetterTeams -->
+        <dependency>
+            <groupId>com.github.booksaw</groupId>
+            <artifactId>BetterTeams</artifactId>
+            <version>4.6.3</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 
     <distributionManagement>

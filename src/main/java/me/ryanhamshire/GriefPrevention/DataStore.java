@@ -18,6 +18,7 @@
 
 package me.ryanhamshire.GriefPrevention;
 
+import com.booksaw.betterTeams.Team;
 import com.google.common.io.Files;
 import com.griefprevention.visualization.BoundaryVisualization;
 import com.griefprevention.visualization.VisualizationType;
@@ -73,6 +74,9 @@ public abstract class DataStore
     //in-memory cache for player data
     protected ConcurrentHashMap<UUID, PlayerData> playerNameToPlayerDataMap = new ConcurrentHashMap<>();
 
+    //in-memory cache for player data
+    protected ConcurrentHashMap<UUID, TeamData> teamNameToTeamDataMap = new ConcurrentHashMap<>();
+
     //in-memory cache for group (permission-based) data
     protected ConcurrentHashMap<String, Integer> permissionToBonusBlocksMap = new ConcurrentHashMap<>();
 
@@ -92,6 +96,7 @@ public abstract class DataStore
     //path information, for where stuff stored on disk is well...  stored
     protected final static String dataLayerFolderPath = "plugins" + File.separator + "GriefPreventionData";
     final static String playerDataFolderPath = dataLayerFolderPath + File.separator + "PlayerData";
+    final static String teamDataFolderPath = dataLayerFolderPath + File.separator + "TeamData";
     final static String configFilePath = dataLayerFolderPath + File.separator + "config.yml";
     final static String messagesFilePath = dataLayerFolderPath + File.separator + "messages.yml";
     final static String softMuteFilePath = dataLayerFolderPath + File.separator + "softMute.txt";
@@ -409,7 +414,7 @@ public abstract class DataStore
 
         //determine current claim owner
         PlayerData ownerData = null;
-        if (!claim.isAdminClaim())
+        if (!claim.isAdminClaim() && !claim.isTeamClaim())
         {
             ownerData = this.getPlayerData(claim.ownerID);
         }
@@ -470,10 +475,13 @@ public abstract class DataStore
         newClaim.inDataStore = true;
 
         //except for administrative claims (which have no owner), update the owner's playerData with the new claim
-        if (!newClaim.isAdminClaim() && writeToStorage)
+        if (!newClaim.isAdminClaim() && !newClaim.isTeamClaim() && writeToStorage)
         {
             PlayerData ownerData = this.getPlayerData(newClaim.ownerID);
             ownerData.getClaims().add(newClaim);
+        } else if (newClaim.isTeamClaim() && writeToStorage) {
+            TeamData teamData = this.getTeamData(newClaim.ownerID);
+            teamData.getClaims().add(newClaim);
         }
 
         //make sure the claim is saved to disk
@@ -628,6 +636,30 @@ public abstract class DataStore
 
     abstract PlayerData getPlayerDataFromStorage(UUID playerID);
 
+    //removes cached player data from memory
+    synchronized void clearCachedTeamData(UUID teamID)
+    {
+        this.teamNameToTeamDataMap.remove(teamID);
+    }
+
+    synchronized public TeamData getTeamData(UUID teamID)
+    {
+        //first, look in memory
+        TeamData teamData = this.teamNameToTeamDataMap.get(teamID);
+
+        //if not there, build a fresh instance with some blanks for what may be in secondary storage
+        if (teamData == null)
+        {
+            teamData = new TeamData();
+            teamData.teamID = teamID;
+
+            //shove that new player data into the hash map cache
+            this.teamNameToTeamDataMap.put(teamID, teamData);
+        }
+
+        return teamData;
+    }
+
     //deletes a claim or subdivision
     synchronized public void deleteClaim(Claim claim)
     {
@@ -674,7 +706,7 @@ public abstract class DataStore
         this.deleteClaimFromSecondaryStorage(claim);
 
         //update player data
-        if (claim.ownerID != null)
+        if (claim.ownerID != null && !claim.isTeamClaim())
         {
             PlayerData ownerData = this.getPlayerData(claim.ownerID);
             for (int i = 0; i < ownerData.getClaims().size(); i++)
@@ -686,6 +718,17 @@ public abstract class DataStore
                 }
             }
             this.savePlayerData(claim.ownerID, ownerData);
+        } else if (claim.isTeamClaim()) {
+            TeamData teamData = this.getTeamData(claim.ownerID);
+            for (int i = 0; i < teamData.getClaims().size(); i++)
+            {
+                if (teamData.getClaims().get(i).id.equals(claim.id))
+                {
+                    teamData.getClaims().remove(i);
+                    break;
+                }
+            }
+            this.saveTeamData(claim.ownerID, teamData);
         }
 
         if (fireEvent)
@@ -867,9 +910,13 @@ public abstract class DataStore
     /*
      * Creates a claim and flags it as being new....throwing a create claim event;
      */
+    synchronized public CreateClaimResult createClaim(World world, int x1, int x2, int y1, int y2, int z1, int z2, UUID ownerID, Claim parent, Long id, Player creatingPlayer, boolean isTeamClaim)
+    {
+        return createClaim(world, x1, x2, y1, y2, z1, z2, ownerID, parent, id, creatingPlayer, false, isTeamClaim);
+    }
     synchronized public CreateClaimResult createClaim(World world, int x1, int x2, int y1, int y2, int z1, int z2, UUID ownerID, Claim parent, Long id, Player creatingPlayer)
     {
-        return createClaim(world, x1, x2, y1, y2, z1, z2, ownerID, parent, id, creatingPlayer, false);
+        return createClaim(world, x1, x2, y1, y2, z1, z2, ownerID, parent, id, creatingPlayer, false, false);
     }
 
     //creates a claim.
@@ -883,7 +930,7 @@ public abstract class DataStore
     //does NOT check a player has permission to create a claim, or enough claim blocks.
     //does NOT check minimum claim size constraints
     //does NOT visualize the new claim for any players
-    synchronized public CreateClaimResult createClaim(World world, int x1, int x2, int y1, int y2, int z1, int z2, UUID ownerID, Claim parent, Long id, Player creatingPlayer, boolean dryRun)
+    synchronized public CreateClaimResult createClaim(World world, int x1, int x2, int y1, int y2, int z1, int z2, UUID ownerID, Claim parent, Long id, Player creatingPlayer, boolean dryRun, boolean isTeamClaim)
     {
         CreateClaimResult result = new CreateClaimResult();
 
@@ -955,7 +1002,7 @@ public abstract class DataStore
                 new ArrayList<>(),
                 new ArrayList<>(),
                 new ArrayList<>(),
-                id);
+                id, isTeamClaim);
 
         newClaim.parent = parent;
 
@@ -1075,6 +1122,35 @@ public abstract class DataStore
     }
 
     abstract void overrideSavePlayerData(UUID playerID, PlayerData playerData);
+
+    //saves changes to player data to secondary storage.  MUST be called after you're done making changes, otherwise a reload will lose them
+    public void saveTeamDataSync(UUID teamID, TeamData teamData)
+    {
+        //ensure player data is already read from file before trying to save
+        teamData.getBaseClaimBlocks();
+        teamData.getClaims();
+
+        this.asyncSaveTeamData(teamID, teamData);
+    }
+
+    //saves changes to player data to secondary storage.  MUST be called after you're done making changes, otherwise a reload will lose them
+    public void saveTeamData(UUID teamID, TeamData teamData)
+    {
+        new SaveTeamDataThread(teamID, teamData).start();
+    }
+
+    public void asyncSaveTeamData(UUID teamID, TeamData teamData)
+    {
+        //save everything except the ignore list
+        this.overrideSaveTeamData(teamID, teamData);
+
+    }
+
+    abstract TeamData getTeamDataFromStorage(UUID teamID);
+
+    abstract boolean removeTeamDataFromStorage(UUID teamID);
+
+    abstract void overrideSaveTeamData(UUID teamID, TeamData teamData);
 
     //extends a claim to a new depth
     //respects the max depth config variable
@@ -1380,12 +1456,38 @@ public abstract class DataStore
         }
     }
 
+    //deletes all claims owned by a team
+    synchronized public void deleteClaimsForTeam(UUID teamID, boolean releasePets)
+    {
+        //make a list of the player's claims
+        ArrayList<Claim> claimsToDelete = new ArrayList<>();
+        for (Claim claim : this.claims)
+        {
+            if ((Objects.equals(teamID, claim.ownerID)))
+                claimsToDelete.add(claim);
+        }
+
+        //delete them one by one
+        for (Claim claim : claimsToDelete)
+        {
+            claim.removeSurfaceFluids(null);
+
+            this.deleteClaim(claim, releasePets);
+
+            //if in a creative mode world, delete the claim
+            if (GriefPrevention.instance.creativeRulesApply(claim.getLesserBoundaryCorner()))
+            {
+                GriefPrevention.instance.restoreClaim(claim, 0);
+            }
+        }
+    }
+
     //tries to resize a claim
     //see CreateClaim() for details on return value
     synchronized public CreateClaimResult resizeClaim(Claim claim, int newx1, int newx2, int newy1, int newy2, int newz1, int newz2, Player resizingPlayer)
     {
         //try to create this new claim, ignoring the original when checking for overlap
-        CreateClaimResult result = this.createClaim(claim.getLesserBoundaryCorner().getWorld(), newx1, newx2, newy1, newy2, newz1, newz2, claim.ownerID, claim.parent, claim.id, resizingPlayer, true);
+        CreateClaimResult result = this.createClaim(claim.getLesserBoundaryCorner().getWorld(), newx1, newx2, newy1, newy2, newz1, newz2, claim.ownerID, claim.parent, claim.id, resizingPlayer, true, claim.isTeamClaim());
 
         //if succeeded
         if (result.succeeded)
@@ -1435,6 +1537,17 @@ public abstract class DataStore
             {
                 int newArea = newWidth * newHeight;
                 int blocksRemainingAfter = playerData.getRemainingClaimBlocks() + playerData.claimResizing.getArea() - newArea;
+
+                if (blocksRemainingAfter < 0)
+                {
+                    GriefPrevention.sendMessage(player, TextMode.Err, Messages.ResizeNeedMoreBlocks, String.valueOf(Math.abs(blocksRemainingAfter)));
+                    this.tryAdvertiseAdminAlternatives(player);
+                    return;
+                }
+            } else if (playerData.claimResizing.isTeamClaim() && Team.getTeam(playerData.claimResizing.ownerID).getMembers().getConvertedList().contains(player.getUniqueId() + ",OWNER")) {
+                int newArea = newWidth * newHeight;
+                TeamData teamData = this.getTeamData(playerData.claimResizing.ownerID);
+                int blocksRemainingAfter = teamData.getRemainingClaimBlocks() + playerData.claimResizing.getArea() - newArea;
 
                 if (blocksRemainingAfter < 0)
                 {
@@ -1495,7 +1608,15 @@ public abstract class DataStore
                 {
                     ownerID = playerData.claimResizing.parent.ownerID;
                 }
-                if (ownerID == player.getUniqueId())
+                if (playerData.claimResizing.isTeamClaim()) {
+                    Team team = Team.getTeam(player);
+                    if (team != null) {
+                        if (ownerID.equals(team.getID())) {
+                            claimBlocksRemaining = this.getTeamData(team.getID()).getRemainingClaimBlocks();
+                        }
+                    }
+                }
+                else if (ownerID == player.getUniqueId())
                 {
                     claimBlocksRemaining = playerData.getRemainingClaimBlocks();
                 }
@@ -1616,6 +1737,10 @@ public abstract class DataStore
         this.addDefault(defaults, Messages.BasicClaimsMode, "Returned to basic claim creation mode.", null);
         this.addDefault(defaults, Messages.SubdivisionMode, "Subdivision mode.  Use your shovel to create subdivisions in your existing claims.  Use /basicclaims to exit.", null);
         this.addDefault(defaults, Messages.SubdivisionVideo2, "Click for Subdivision Help: {0}", "0:video URL");
+        this.addDefault(defaults, Messages.TeamMode, "Team claim mode.  Use your shovel to create claims for your team using your team claim blocks.  Use /basicclaims to exit.", null);
+        this.addDefault(defaults, Messages.TeamVideo, "Click for team claim help: {0}", "0:video URL");
+        this.addDefault(defaults, Messages.NoTeam, "You must be on a team to do that!", null);
+        this.addDefault(defaults, Messages.NotTeamOwner, "You must be a team owner to do that!", null);
         this.addDefault(defaults, Messages.DeleteClaimMissing, "There's no claim here.", null);
         this.addDefault(defaults, Messages.DeletionSubdivisionWarning, "This claim includes subdivisions.  If you're sure you want to delete it, use /DeleteClaim again.", null);
         this.addDefault(defaults, Messages.DeleteSuccess, "Claim deleted.", null);
@@ -1643,6 +1768,7 @@ public abstract class DataStore
         this.addDefault(defaults, Messages.NotYourClaim, "This isn't your claim.", null);
         this.addDefault(defaults, Messages.DeleteTopLevelClaim, "To delete a subdivision, stand inside it.  Otherwise, use /AbandonTopLevelClaim to delete this claim and all subdivisions.", null);
         this.addDefault(defaults, Messages.AbandonSuccess, "Claim abandoned.  You now have {0} available claim blocks.", "0: remaining claim blocks");
+        this.addDefault(defaults, Messages.TeamAbandonSuccess, "Claim abandoned.  Your team now has {0} available claim blocks.", "0: remaining claim blocks");
         this.addDefault(defaults, Messages.ConfirmAbandonAllClaims, "Are you sure you want to abandon ALL of your claims?  Please confirm with /AbandonAllClaims confirm", null);
         this.addDefault(defaults, Messages.CantGrantThatPermission, "You can't grant a permission you don't have yourself.", null);
         this.addDefault(defaults, Messages.GrantPermissionNoClaim, "Stand inside the claim where you want to grant permission.", null);
@@ -1707,6 +1833,7 @@ public abstract class DataStore
         this.addDefault(defaults, Messages.NewClaimTooNarrow, "This claim would be too small.  Any claim must be at least {0} blocks wide.", "0: minimum claim width");
         this.addDefault(defaults, Messages.ResizeClaimInsufficientArea, "This claim would be too small.  Any claim must use at least {0} total claim blocks.", "0: minimum claim area");
         this.addDefault(defaults, Messages.CreateClaimInsufficientBlocks, "You don't have enough blocks to claim that entire area.  You need {0} more blocks.", "0: additional blocks needed");
+        this.addDefault(defaults, Messages.CreateTeamClaimInsufficientBlocks, "Your team does not have enough blocks to claim that entire area.  You need {0} more blocks.", "0: additional blocks needed");
         this.addDefault(defaults, Messages.AbandonClaimAdvertisement, "To delete another claim and free up some blocks, use /AbandonClaim.", null);
         this.addDefault(defaults, Messages.CreateClaimFailOverlapShort, "Your selected area overlaps an existing claim.", null);
         this.addDefault(defaults, Messages.CreateClaimSuccess, "Claim created!  Use /trust to share it with friends.", null);
@@ -1766,6 +1893,7 @@ public abstract class DataStore
         this.addDefault(defaults, Messages.AvoidGriefClaimLand, "Prevent grief!  If you claim your land, you will be grief-proof.", null);
         this.addDefault(defaults, Messages.BecomeMayor, "Subdivide your land claim and become a mayor!", null);
         this.addDefault(defaults, Messages.ClaimCreationFailedOverClaimCountLimit, "You've reached your limit on land claims.  Use /AbandonClaim to remove one before creating another.", null);
+        this.addDefault(defaults, Messages.ClaimCreationFailedOverTeamClaimCountLimit, "Your team has reached the limit for land claims. Use /AbandomClaim to remove one before creating another.", null);
         this.addDefault(defaults, Messages.CreateClaimFailOverlapRegion, "You can't claim all of this because you're not allowed to build here.", null);
         this.addDefault(defaults, Messages.ResizeFailOverlapRegion, "You don't have permission to build there, so you can't claim that area.", null);
         this.addDefault(defaults, Messages.ShowNearbyClaims, "Found {0} land claims.", "0: Number of claims found.");
@@ -1945,6 +2073,26 @@ public abstract class DataStore
             playerData.getAccruedClaimBlocks();
             playerData.getClaims();
             asyncSavePlayerData(this.playerID, this.playerData);
+        }
+    }
+
+    private class SaveTeamDataThread extends Thread
+    {
+        private final UUID teamID;
+        private final TeamData teamData;
+
+        SaveTeamDataThread(UUID teamID, TeamData teamData)
+        {
+            this.teamID = teamID;
+            this.teamData = teamData;
+        }
+
+        public void run()
+        {
+            //ensure player data is already read from file before trying to save
+            teamData.getBaseClaimBlocks();
+            teamData.getClaims();
+            asyncSaveTeamData(this.teamID, this.teamData);
         }
     }
 

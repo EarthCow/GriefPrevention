@@ -18,6 +18,7 @@
 
 package me.ryanhamshire.GriefPrevention;
 
+import com.booksaw.betterTeams.Team;
 import com.griefprevention.visualization.BoundaryVisualization;
 import com.griefprevention.visualization.VisualizationType;
 import me.ryanhamshire.GriefPrevention.events.ClaimInspectionEvent;
@@ -2494,12 +2495,23 @@ class PlayerEventHandler implements Listener
                 }
 
                 //if he's at the claim count per player limit already and doesn't have permission to bypass, display an error message
-                if (instance.config_claims_maxClaimsPerPlayer > 0 &&
-                        !player.hasPermission("griefprevention.overrideclaimcountlimit") &&
-                        playerData.getClaims().size() >= instance.config_claims_maxClaimsPerPlayer)
+                if (playerData.shovelMode == ShovelMode.Basic)
                 {
-                    GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimCreationFailedOverClaimCountLimit);
-                    return;
+                    if (instance.config_claims_maxClaimsPerPlayer > 0 &&
+                            !player.hasPermission("griefprevention.overrideclaimcountlimit") &&
+                            playerData.getClaims().size() >= instance.config_claims_maxClaimsPerPlayer)
+                    {
+                        GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimCreationFailedOverClaimCountLimit);
+                        return;
+                    }
+                } else if (playerData.shovelMode == ShovelMode.Team) {
+                    if (instance.config_claims_maxClaimsPerTeam > 0 &&
+                            !player.hasPermission("griefprevention.overrideteamclaimcountlimit") &&
+                            playerData.getClaims().size() >= instance.config_claims_maxClaimsPerTeam)
+                    {
+                        GriefPrevention.sendMessage(player, TextMode.Err, Messages.ClaimCreationFailedOverTeamClaimCountLimit);
+                        return;
+                    }
                 }
 
                 //remember it, and start him on the new claim
@@ -2560,12 +2572,28 @@ class PlayerEventHandler implements Listener
                 if (playerData.shovelMode != ShovelMode.Admin)
                 {
                     int newClaimArea = newClaimWidth * newClaimHeight;
-                    int remainingBlocks = playerData.getRemainingClaimBlocks();
-                    if (newClaimArea > remainingBlocks)
-                    {
-                        GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateClaimInsufficientBlocks, String.valueOf(newClaimArea - remainingBlocks));
-                        instance.dataStore.tryAdvertiseAdminAlternatives(player);
-                        return;
+                    if (playerData.shovelMode != ShovelMode.Team) {
+                        int remainingBlocks = playerData.getRemainingClaimBlocks();
+                        if (newClaimArea > remainingBlocks)
+                        {
+                            GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateClaimInsufficientBlocks, String.valueOf(newClaimArea - remainingBlocks));
+                            instance.dataStore.tryAdvertiseAdminAlternatives(player);
+                            return;
+                        }
+                    } else {
+                        Team team = Team.getTeam(player);
+                        if (team == null) {
+                            return;
+                        }
+                        playerID = team.getID();
+                        TeamData teamData = this.dataStore.getTeamData(team.getID());
+                        int remainingBlocks = teamData.getRemainingClaimBlocks();
+                        if (newClaimArea > remainingBlocks)
+                        {
+                            GriefPrevention.sendMessage(player, TextMode.Err, Messages.CreateTeamClaimInsufficientBlocks, String.valueOf(newClaimArea - remainingBlocks));
+                            instance.dataStore.tryAdvertiseAdminAlternatives(player);
+                            return;
+                        }
                     }
                 }
                 else
@@ -2581,7 +2609,7 @@ class PlayerEventHandler implements Listener
                         lastShovelLocation.getBlockZ(), clickedBlock.getZ(),
                         playerID,
                         null, null,
-                        player);
+                        player, playerData.shovelMode == ShovelMode.Team);
 
                 //if it didn't succeed, tell the player why
                 if (!result.succeeded || result.claim == null)

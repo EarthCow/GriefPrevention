@@ -22,6 +22,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
+import org.bukkit.scoreboard.Team;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -547,6 +548,35 @@ public class DatabaseDataStore extends DataStore
             e.printStackTrace(new PrintWriter(errors));
             GriefPrevention.AddLogEntry(playerID + " " + errors.toString(), CustomLogEntryTypes.Exception);
         }
+    }
+
+    @Override
+    TeamData getTeamDataFromStorage(UUID teamID)
+    {
+        TeamData teamData = new TeamData();
+
+        return teamData;
+    }
+
+    @Override
+    boolean removeTeamDataFromStorage(UUID teamID)
+    {
+        return false;
+    }
+
+    //saves changes to player data.  MUST be called after you're done making changes, otherwise a reload will lose them
+    @Override
+    public void overrideSaveTeamData(UUID teamID, TeamData teamData)
+    {
+        //never save data for the "administrative" account.  an empty string for player name indicates administrative account
+        if (teamID == null) return;
+
+        this.saveTeamData(teamID.toString(), teamData);
+    }
+
+    private void saveTeamData(String teamID, TeamData teamData)
+    {
+
     }
 
     @Override
